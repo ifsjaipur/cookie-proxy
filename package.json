@@ -1,0 +1,30 @@
+{
+  "name": "cookie-proxy",
+  "version": "0.1.0",
+  "description": "Browser-backed cookie/token proxy for bot-protected sites. Useful for n8n HTTP nodes hitting Cloudflare/AWS-WAF protected APIs.",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "cp-issue-key": "bin/issue-key.js",
+    "cp-revoke-key": "bin/revoke-key.js",
+    "cp-list-keys": "bin/list-keys.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "issue-key": "node bin/issue-key.js",
+    "revoke-key": "node bin/revoke-key.js",
+    "list-keys": "node bin/list-keys.js",
+    "postinstall": "playwright install chromium"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^10.2.1",
+    "better-sqlite3": "^11.7.0",
+    "fastify": "^5.2.1",
+    "playwright": "^1.49.1"
+  }
+}
