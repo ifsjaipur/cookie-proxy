@@ -7,7 +7,9 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
     DB_PATH=/data/cookie-proxy.db \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    REBROWSER_PATCHES_RUNTIME_FIX_MODE=addBinding \
+    REBROWSER_PATCHES_SOURCE_URL=app.js
 
 WORKDIR /app
 
@@ -21,8 +23,8 @@ RUN apt-get update \
 COPY package.json ./
 RUN npm install --omit=dev
 
-# Have Playwright install Chromium + every system dep it requires.
-RUN npx playwright install --with-deps chromium \
+# Have rebrowser-playwright install Chromium + every system dep it requires.
+RUN npx rebrowser-playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/*
 
 COPY src ./src

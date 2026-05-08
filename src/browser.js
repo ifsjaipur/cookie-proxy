@@ -1,4 +1,4 @@
-import { chromium } from 'playwright';
+import { chromium } from 'rebrowser-playwright';
 
 const MAX_BROWSERS = Number(process.env.MAX_BROWSERS || 4);
 const COOKIE_TTL_MS = Number(process.env.COOKIE_TTL_MS || 20 * 60 * 1000);
