@@ -5,6 +5,8 @@ import {
   solveAndGetCookies,
   fetchThroughBrowser,
   debugSolve,
+  injectManualCookies,
+  peekCache,
   cacheStats,
   purgeCache,
   shutdown,
@@ -14,6 +16,18 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL || 'info' } });
+
+// Allow the bookmarklet (running on any site) to POST /cookies/manual
+// from a third-party origin. The endpoint is still auth-gated by the
+// Bearer token, so this is safe.
+app.addHook('onRequest', async (req, reply) => {
+  reply.header('Access-Control-Allow-Origin', '*');
+  reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  reply.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    reply.code(204).send();
+  }
+});
 
 await app.register(rateLimit, {
   global: false,
@@ -101,6 +115,35 @@ app.post('/fetch', {
       });
     }
   },
+});
+
+app.post('/cookies/manual', {
+  config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+  schema: {
+    body: {
+      type: 'object',
+      required: ['url'],
+      properties: {
+        url: { type: 'string', minLength: 8 },
+        cookieHeader: { type: 'string' },
+        cookies: { type: 'array' },
+        userAgent: { type: 'string' },
+        ttlMs: { type: 'integer', minimum: 60_000, maximum: 24 * 60 * 60 * 1000 },
+      },
+    },
+  },
+  handler: async (req, reply) => {
+    try {
+      return injectManualCookies(req.body);
+    } catch (err) {
+      return reply.code(400).send({ error: 'BAD_INPUT', message: err.message });
+    }
+  },
+});
+
+app.get('/cookies/peek', {
+  config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+  handler: async (req) => peekCache(req.query?.host),
 });
 
 app.post('/debug', {

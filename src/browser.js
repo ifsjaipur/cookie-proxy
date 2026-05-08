@@ -365,6 +365,76 @@ export async function fetchThroughBrowser(targetUrl, { method = 'GET', headers =
   }
 }
 
+// Manually inject cookies for a host. Used when a site (e.g. Trendlyne) is
+// too aggressively guarded for headless Playwright to pass — the user
+// solves the challenge once in their real browser, copies the cookies via
+// the bookmarklet, and POSTs them here. Stored in the same cache the
+// auto-solver uses, so /cookies hands them right back out.
+export function injectManualCookies({ url, cookieHeader, cookies, userAgent, ttlMs }) {
+  if (!url) throw new Error('url required');
+  const host = hostnameOf(url);
+  if (!host) throw new Error('Invalid URL');
+
+  let cookieArr = Array.isArray(cookies) ? cookies : null;
+  let header = cookieHeader || '';
+
+  // If they passed a header string but no array, parse the string.
+  if (!cookieArr && header) {
+    cookieArr = header.split(';').map((pair) => {
+      const eq = pair.indexOf('=');
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      return { name, value, domain: '.' + host, path: '/', secure: true, sameSite: 'Lax' };
+    }).filter((c) => c.name);
+  }
+
+  if (!cookieArr || !cookieArr.length) {
+    throw new Error('Provide cookies (array) or cookieHeader (string).');
+  }
+
+  // Reconstruct the header from the array if not given.
+  if (!header) {
+    header = cookieArr.map((c) => `${c.name}=${c.value}`).join('; ');
+  }
+
+  const payload = {
+    url,
+    host,
+    userAgent: userAgent || UA,
+    cookies: cookieArr,
+    cookieHeader: header,
+    fetchedAt: new Date().toISOString(),
+    cached: false,
+    source: 'manual',
+  };
+
+  const ttl = Number(ttlMs) > 0 ? Number(ttlMs) : COOKIE_TTL_MS;
+  cache.set(host, { payload, expiresAt: Date.now() + ttl });
+  return { ...payload, expiresAt: new Date(Date.now() + ttl).toISOString() };
+}
+
+export function peekCache(host) {
+  if (host) {
+    const e = cache.get(host);
+    if (!e) return null;
+    return {
+      host,
+      expiresAt: new Date(e.expiresAt).toISOString(),
+      expiresInMs: e.expiresAt - Date.now(),
+      source: e.payload.source || 'auto',
+      cookieCount: e.payload.cookies.length,
+      cookieHeaderPreview: (e.payload.cookieHeader || '').slice(0, 200),
+    };
+  }
+  return [...cache.entries()].map(([h, e]) => ({
+    host: h,
+    expiresAt: new Date(e.expiresAt).toISOString(),
+    expiresInMs: e.expiresAt - Date.now(),
+    source: e.payload.source || 'auto',
+    cookieCount: e.payload.cookies.length,
+  }));
+}
+
 export function cacheStats() {
   return {
     hosts: cache.size,
