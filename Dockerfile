@@ -1,5 +1,5 @@
 # Playwright base image ships Chromium and all Linux deps preinstalled.
-FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+FROM mcr.microsoft.com/playwright:v1.59.1-jammy
 
 ENV NODE_ENV=production \
     PORT=3000 \
