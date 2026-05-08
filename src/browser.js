@@ -226,6 +226,107 @@ export async function solveAndGetCookies(targetUrl, { force = false } = {}) {
   return promise;
 }
 
+// Like solveAndGetCookies but never throws and returns rich diagnostics.
+// For figuring out WHY a challenge isn't clearing (IP block? JS load
+// failure? fingerprint flag?).
+export async function debugSolve(targetUrl, { waitMs = 30_000 } = {}) {
+  const host = hostnameOf(targetUrl);
+  if (!host) throw new Error('Invalid URL');
+
+  await acquireSlot();
+  let context;
+  const consoleMessages = [];
+  const wafResponses = [];
+  const navigations = [];
+  let actualUA = null;
+
+  try {
+    const browser = await getBrowser();
+    context = await browser.newContext({
+      userAgent: UA,
+      viewport: { width: 1366, height: 768 },
+      locale: 'en-US',
+      timezoneId: 'Asia/Kolkata',
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+    await context.addInitScript(STEALTH_INIT);
+
+    const page = await context.newPage();
+    page.setDefaultTimeout(NAV_TIMEOUT_MS);
+
+    page.on('console', (msg) => {
+      consoleMessages.push({ type: msg.type(), text: msg.text().slice(0, 300) });
+    });
+    page.on('pageerror', (err) => {
+      consoleMessages.push({ type: 'pageerror', text: String(err).slice(0, 300) });
+    });
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) navigations.push(frame.url());
+    });
+    page.on('response', (res) => {
+      const u = res.url();
+      if (u.includes('awswaf') || u.includes('captcha') || u.includes('challenge')) {
+        wafResponses.push({ url: u, status: res.status() });
+      }
+    });
+
+    const response = await page.goto(targetUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: NAV_TIMEOUT_MS,
+    });
+    const initialStatus = response?.status() ?? 0;
+    const initialHeaders = response?.headers() ?? {};
+
+    try {
+      actualUA = await page.evaluate(() => navigator.userAgent);
+    } catch {}
+
+    // Just wait — no early exit — so we capture everything that happens.
+    await new Promise((r) => setTimeout(r, waitMs));
+
+    let finalHtml = '';
+    let finalTitle = '';
+    try {
+      finalHtml = await page.content();
+      finalTitle = await page.title();
+    } catch {}
+
+    const cookies = await context.cookies();
+    const fingerprint = await page.evaluate(() => ({
+      webdriver: navigator.webdriver,
+      languages: navigator.languages,
+      pluginCount: navigator.plugins?.length ?? null,
+      hasChrome: typeof window.chrome !== 'undefined',
+      vendor: navigator.vendor,
+      platform: navigator.platform,
+      hwConcurrency: navigator.hardwareConcurrency,
+      maxTouchPoints: navigator.maxTouchPoints,
+    })).catch(() => null);
+
+    return {
+      url: targetUrl,
+      host,
+      configuredUA: UA,
+      actualUA,
+      initialStatus,
+      initialHeaders,
+      navigations,
+      wafResponses,
+      consoleMessages,
+      finalTitle,
+      finalHtmlPreview: finalHtml.slice(0, 1500),
+      finalHtmlLength: finalHtml.length,
+      stillOnChallenge: classifyPage(finalHtml, finalTitle, initialStatus) !== null,
+      cookies,
+      cookieCount: cookies.length,
+      fingerprint,
+    };
+  } finally {
+    if (context) await context.close().catch(() => {});
+    releaseSlot();
+  }
+}
+
 export async function fetchThroughBrowser(targetUrl, { method = 'GET', headers = {}, body } = {}) {
   const host = hostnameOf(targetUrl);
   if (!host) throw new Error('Invalid URL');

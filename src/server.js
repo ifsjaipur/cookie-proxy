@@ -4,6 +4,7 @@ import { authenticate } from './db.js';
 import {
   solveAndGetCookies,
   fetchThroughBrowser,
+  debugSolve,
   cacheStats,
   purgeCache,
   shutdown,
@@ -98,6 +99,30 @@ app.post('/fetch', {
         error: err.code || 'UPSTREAM_FAILURE',
         message: err.message,
       });
+    }
+  },
+});
+
+app.post('/debug', {
+  config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  schema: {
+    body: {
+      type: 'object',
+      required: ['url'],
+      properties: {
+        url: { type: 'string', minLength: 8 },
+        waitMs: { type: 'integer', minimum: 1000, maximum: 60_000 },
+      },
+    },
+  },
+  handler: async (req, reply) => {
+    try {
+      const { url, waitMs = 30_000 } = req.body;
+      const result = await debugSolve(url, { waitMs });
+      return result;
+    } catch (err) {
+      req.log.error({ err }, 'debug failed');
+      return reply.code(502).send({ error: 'DEBUG_FAILURE', message: err.message });
     }
   },
 });
