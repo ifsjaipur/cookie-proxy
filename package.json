@@ -13,10 +13,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "install:browser": "playwright install chromium",
     "issue-key": "node bin/issue-key.js",
     "revoke-key": "node bin/revoke-key.js",
-    "list-keys": "node bin/list-keys.js",
-    "postinstall": "playwright install chromium"
+    "list-keys": "node bin/list-keys.js"
   },
   "engines": {
     "node": ">=20"
