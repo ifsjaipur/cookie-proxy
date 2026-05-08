@@ -2,12 +2,31 @@ import { chromium } from 'playwright';
 
 const MAX_BROWSERS = Number(process.env.MAX_BROWSERS || 4);
 const COOKIE_TTL_MS = Number(process.env.COOKIE_TTL_MS || 20 * 60 * 1000);
-const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 45_000);
-const CHALLENGE_WAIT_MS = Number(process.env.CHALLENGE_WAIT_MS || 8_000);
+const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 60_000);
+const CHALLENGE_MAX_WAIT_MS = Number(process.env.CHALLENGE_MAX_WAIT_MS || 30_000);
+const CHALLENGE_POLL_MS = 500;
 
 const UA =
   process.env.USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// Patches that hide the most obvious "this is automated" tells. Injected
+// before any page script runs.
+const STEALTH_INIT = `
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5].map(() => ({ name: 'Chrome PDF Plugin' })),
+  });
+  window.chrome = window.chrome || { runtime: {}, app: {}, csi: () => {}, loadTimes: () => {} };
+  const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+  if (originalQuery) {
+    window.navigator.permissions.query = (parameters) =>
+      parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters);
+  }
+`;
 
 let sharedBrowser = null;
 let activeContexts = 0;
@@ -25,6 +44,7 @@ async function getBrowser() {
         '--disable-setuid-sandbox',
         '--disable-blink-features=AutomationControlled',
         '--disable-dev-shm-usage',
+        '--disable-features=IsolateOrigins,site-per-process',
       ],
     });
   }
@@ -60,14 +80,57 @@ function cookieHeaderFromArray(cookies, targetHost) {
     .join('; ');
 }
 
-function detectChallenge(html, status) {
+// Returns the kind of challenge page we're looking at, or null if we're
+// already on the real page.
+function classifyPage(html, title, status) {
   if (!html || typeof html !== 'string') return null;
   const lower = html.toLowerCase();
-  if (lower.includes('awswaf') || lower.includes('aws-waf-token')) return 'aws-waf';
-  if (lower.includes('cf-chl') || lower.includes('challenge-platform') || lower.includes('cloudflare')) return 'cloudflare';
-  if (lower.includes('captcha') && lower.includes('verify')) return 'generic-captcha';
+  const lowerTitle = (title || '').toLowerCase();
+
+  if (
+    lowerTitle.includes('human verification') ||
+    lower.includes('captcha-container') ||
+    lower.includes('awsintegration') ||
+    lower.includes('aws-waf') ||
+    lower.includes('awswaf')
+  ) {
+    return 'aws-waf';
+  }
+  if (
+    lower.includes('cf-chl') ||
+    lower.includes('challenge-platform') ||
+    lowerTitle.includes('just a moment') ||
+    lowerTitle.includes('attention required')
+  ) {
+    return 'cloudflare';
+  }
   if (status === 403 || status === 429 || status === 503) return 'blocked';
   return null;
+}
+
+// Wait until the challenge page gives way to the real content. AWS WAF and
+// Cloudflare both reload the page after their JS challenge succeeds, so we
+// poll the document until the challenge markers disappear (or we time out).
+async function waitForChallengeToClear(page) {
+  const deadline = Date.now() + CHALLENGE_MAX_WAIT_MS;
+  let lastKind = null;
+  while (Date.now() < deadline) {
+    let html = '';
+    let title = '';
+    try {
+      html = await page.content();
+      title = await page.title();
+    } catch {
+      // page may be navigating; just retry
+      await new Promise((r) => setTimeout(r, CHALLENGE_POLL_MS));
+      continue;
+    }
+    const kind = classifyPage(html, title, 200);
+    if (!kind) return { cleared: true, kind: lastKind };
+    lastKind = kind;
+    await new Promise((r) => setTimeout(r, CHALLENGE_POLL_MS));
+  }
+  return { cleared: false, kind: lastKind };
 }
 
 export async function solveAndGetCookies(targetUrl, { force = false } = {}) {
@@ -91,7 +154,12 @@ export async function solveAndGetCookies(targetUrl, { force = false } = {}) {
         viewport: { width: 1366, height: 768 },
         locale: 'en-US',
         timezoneId: 'Asia/Kolkata',
+        extraHTTPHeaders: {
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
       });
+      await context.addInitScript(STEALTH_INIT);
+
       const page = await context.newPage();
       page.setDefaultTimeout(NAV_TIMEOUT_MS);
 
@@ -99,35 +167,32 @@ export async function solveAndGetCookies(targetUrl, { force = false } = {}) {
         waitUntil: 'domcontentloaded',
         timeout: NAV_TIMEOUT_MS,
       });
+      const status = response?.status() ?? 0;
 
-      // Give challenge JS a moment to run and set cookies.
-      await page.waitForTimeout(CHALLENGE_WAIT_MS);
+      const result = await waitForChallengeToClear(page);
 
-      let html = '';
+      // Give the page a moment to set any final cookies after the challenge
+      // clears (some sites set session cookies on the post-challenge load).
       try {
-        html = await page.content();
+        await page.waitForLoadState('networkidle', { timeout: 5000 });
       } catch {}
 
-      const status = response?.status() ?? 0;
-      const challenge = detectChallenge(html, status);
-
-      // If we still see a challenge page after the wait, try one more reload.
-      if (challenge && challenge !== 'blocked') {
-        await page.waitForTimeout(3_000);
-        try {
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-          await page.waitForTimeout(CHALLENGE_WAIT_MS);
-          html = await page.content();
-        } catch {}
-      }
-
       const cookies = await context.cookies();
-      const finalChallenge = detectChallenge(html, status);
+      let html = '';
+      let title = '';
+      try {
+        html = await page.content();
+        title = await page.title();
+      } catch {}
+      const finalKind = classifyPage(html, title, status);
 
-      if (finalChallenge === 'generic-captcha') {
-        const err = new Error('Interactive captcha required (not supported in v1).');
-        err.code = 'CAPTCHA_REQUIRED';
-        err.kind = finalChallenge;
+      if (!result.cleared && finalKind) {
+        const err = new Error(
+          `Challenge did not clear within ${CHALLENGE_MAX_WAIT_MS}ms (kind=${finalKind}). ` +
+            'Site may require interactive captcha or stronger fingerprint masking.'
+        );
+        err.code = finalKind === 'aws-waf' || finalKind === 'cloudflare' ? 'CHALLENGE_TIMEOUT' : 'CAPTCHA_REQUIRED';
+        err.kind = finalKind;
         throw err;
       }
 
@@ -143,6 +208,7 @@ export async function solveAndGetCookies(targetUrl, { force = false } = {}) {
         userAgent: UA,
         cookies,
         cookieHeader: cookieHeaderFromArray(cookies, host),
+        challengeKindSeen: result.kind,
         fetchedAt: new Date().toISOString(),
         cached: false,
       };
@@ -171,6 +237,7 @@ export async function fetchThroughBrowser(targetUrl, { method = 'GET', headers =
   try {
     const browser = await getBrowser();
     context = await browser.newContext({ userAgent: UA });
+    await context.addInitScript(STEALTH_INIT);
     const cached = cache.get(host);
     if (cached) await context.addCookies(cached.payload.cookies);
 
