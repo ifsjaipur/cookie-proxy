@@ -23,8 +23,9 @@ RUN apt-get update \
 COPY package.json ./
 RUN npm install --omit=dev
 
-# Have rebrowser-playwright install Chromium + every system dep it requires.
-RUN npx rebrowser-playwright install --with-deps chromium \
+# Install Chromium + system deps via the upstream playwright CLI
+# (rebrowser-playwright reuses these binaries; it just patches behavior).
+RUN npx playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/*
 
 COPY src ./src
