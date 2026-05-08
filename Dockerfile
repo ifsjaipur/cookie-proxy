@@ -8,11 +8,20 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     DB_PATH=/data/cookie-proxy.db
 
-# Install Node 22 LTS from NodeSource, replacing the bundled Node.
+# Install Node 22 LTS from NodeSource and force it onto the PATH ahead of
+# the Playwright base image's bundled Node 24 (which lives in /usr/local/bin
+# and would otherwise win). better-sqlite3 ships prebuilt binaries for Node
+# 22 but not yet for Node 24, so we need 22 specifically.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
+ && rm -f /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+ && ln -sf /usr/bin/node /usr/local/bin/node \
+ && ln -sf /usr/bin/npm /usr/local/bin/npm \
+ && ln -sf /usr/bin/npx /usr/local/bin/npx \
+ && node --version \
+ && npm --version \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
